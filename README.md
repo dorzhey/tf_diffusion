@@ -1,6 +1,6 @@
 # Workplace for diffusion regulatory element design models
 
-This repository contains code related to running diffusion models for regulatory element design on single cell data
+This repository contains code related to running diffusion models for regulatory element design on single cell data. This is a show repo, original is private and belongs to mkarikomi
 
 Currently, the repo has 4 different models
 
