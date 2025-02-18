@@ -32,10 +32,22 @@ training_data_path =  os.path.join(file_dir, 'train_data')
 from utils_data import one_hot_encode, one_hot_encode_dna_sequence, call_motif_scan
 
 def calculate_start_end_indices(total_length, num_processes, process_index):
+    """Calculate start and end indices for data partitioning.
+
+    Calculates the start and end indices for a subset of data based on the total number of samples,
+    the number of processes, and the index of the current process. The load is balanced by distributing any
+    remainder samples to the initial processes.
+
+    Args:
+        total_length (int): Total number of data samples.
+        num_processes (int): Total number of processes to divide the data among.
+        process_index (int): Index of the current process (zero-based).
+
+    Returns:
+        tuple: A tuple (start_index, end_index) representing the starting index (inclusive) and ending index (exclusive)
+            of the data portion assigned to the specified process.
     """
-    Calculate the start and end indices for the portion of data that a specific process will handle,
-    balancing the load by distributing remainder samples to the initial processes.
-    """
+
     num_per_process = total_length // num_processes
     remainder = total_length % num_processes
     
@@ -53,6 +65,33 @@ def calculate_validation_metrics(
         get_kmer_metrics=False, # takes a long time
         train_kmer_emb=None, 
         kmer_length=5):
+    
+    """Calculate validation metrics comparing generated data against training data.
+
+    This function computes multiple validation metrics comparing generated motifs and sequences against training data.
+    Metrics include Jensen-Shannon divergence for training, testing, and shuffled motifs, GC content ratio, minimum edit
+    distance between sets, and optionally, k-mer based metrics computed via PCA and k-nearest neighbors.
+
+    Args:
+        motif_data (dict): Dictionary containing motif information with keys "train_motifs", "test_motifs", and "shuffle_motifs".
+        train_sequences (list): List of training DNA sequences.
+        generated_motif (pandas.DataFrame or None): DataFrame containing generated motif information. If None, motif metrics default to NaN.
+        generated_sequences (list): List of generated DNA sequences.
+        get_kmer_metrics (bool, optional): Flag to compute additional k-mer based metrics. Defaults to False.
+        train_kmer_emb (numpy.ndarray, optional): Precomputed k-mer embeddings for training sequences. Defaults to None.
+        kmer_length (int, optional): Length of k-mers to use for k-mer based metrics. Defaults to 5.
+
+    Returns:
+        tuple: A tuple containing:
+            - train_js (float): Jensen-Shannon divergence between generated motifs and training motifs.
+            - test_js (float): Jensen-Shannon divergence between generated motifs and test motifs.
+            - shuffle_js (float): Jensen-Shannon divergence between generated motifs and shuffled motifs.
+            - gc_ratio (float): Ratio of GC content between generated and training sequences.
+            - min_edit_distance (float): Mean minimum edit distance between generated and training sequences.
+            - knn_distance (float): Mean k-nearest neighbor distance (if k-mer metrics are computed; otherwise 0).
+            - distance_from_closest (float): Average distance from the closest neighbor (if k-mer metrics are computed; otherwise 0).
+    """
+
     if generated_motif is None:
         return np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan
     train_js = compare_motif_list(generated_motif, motif_data["train_motifs"]) if motif_data.get("train_motifs") is not None else np.nan
@@ -88,7 +127,34 @@ def calculate_validation_metrics_parallel(
         train_kmer_emb=None,
         kmer_length=5
     ):
-    
+    """Calculate validation metrics in parallel using an accelerator.
+
+    This function computes validation metrics for generated motifs and sequences in a parallelized manner using an accelerator
+    object. It calculates Jensen-Shannon divergences for motifs on the main process and, if requested, computes sequence-based metrics
+    such as GC content ratio and minimum edit distance. Optionally, it also computes k-mer based metrics using GPU acceleration.
+
+    Args:
+        motif_data (dict): Dictionary containing motif information with keys "train_motifs", "test_motifs", and "shuffle_motifs".
+        generated_motif (pandas.DataFrame or None): DataFrame containing generated motif information. If None, motif metrics default to NaN.
+        train_sequences (list): List of training DNA sequences.
+        generated_sequences (list): List of generated DNA sequences.
+        accelerator: An accelerator object providing device information and print methods (e.g., from a distributed training framework).
+        get_seq_metrics (bool, optional): Flag to compute sequence-based metrics (GC content and edit distance). Defaults to False.
+        get_kmer_metrics (bool, optional): Flag to compute k-mer based metrics. Defaults to False.
+        train_kmer_emb (numpy.ndarray, optional): Precomputed k-mer embeddings for training sequences. Defaults to None.
+        kmer_length (int, optional): Length of k-mers to use for k-mer based metrics. Defaults to 5.
+
+    Returns:
+        tuple: A tuple containing:
+            - train_js (float or None): Jensen-Shannon divergence between generated motifs and training motifs (computed on the main process).
+            - test_js (float or None): Jensen-Shannon divergence between generated motifs and test motifs.
+            - shuffle_js (float or None): Jensen-Shannon divergence between generated motifs and shuffled motifs.
+            - gc_ratio (float): Ratio of GC content between generated and training sequences.
+            - min_edit_distance (float): Mean minimum edit distance between generated and training sequences.
+            - knn_distance (float): Mean k-nearest neighbor distance (if k-mer metrics are computed; otherwise 0).
+            - distance_from_closest (float): Average distance from the closest neighbor (if k-mer metrics are computed; otherwise 0).
+    """
+
     if accelerator.is_main_process:
         start_time = time.time()
         train_js = compare_motif_list(generated_motif, motif_data["train_motifs"]) if motif_data.get("train_motifs") is not None else np.nan
@@ -159,6 +225,22 @@ def encode_dna_sequences(sequences):
     return encoded_sequences
 
 def compute_edit_distance_batches(train_seqs, gen_seqs, max_train_batch=100, max_gen_batch=100):
+    """Compute minimum edit distances between batches of training and generated sequences.
+
+    This function calculates the edit distance between each generated sequence and all training sequences using dynamic programming.
+    It processes the sequences in batches to handle memory constraints and returns a tensor containing the minimum edit distance
+    for each generated sequence across all training batches.
+
+    Args:
+        train_seqs (torch.Tensor): Encoded training sequences as a tensor of shape (train_size, seq_len).
+        gen_seqs (torch.Tensor): Encoded generated sequences as a tensor of shape (gen_size, seq_len).
+        max_train_batch (int, optional): Maximum number of training sequences to process per batch. Defaults to 100.
+        max_gen_batch (int, optional): Maximum number of generated sequences to process per batch. Defaults to 100.
+
+    Returns:
+        torch.Tensor: A tensor containing the minimum edit distance for each generated sequence.
+    """
+
     train_size, seq_len = train_seqs.size()
     gen_size = gen_seqs.size(0)
     all_min_distances = []
@@ -229,6 +311,20 @@ def min_edit_distance_between_sets(train_sequences, generated_sequences, device=
 
 
 def sequence_to_kmer_indices_vectorized(sequences, k=5):
+    """Convert a list of DNA sequences into vectorized k-mer indices.
+
+    This function maps each DNA sequence to a series of k-mer indices by treating each nucleotide as a digit in a base-4 number,
+    using the mapping: {'A': 0, 'C': 1, 'G': 2, 'T': 3}. It returns an array where each row corresponds to a sequence and each column
+    contains the integer representation of a k-mer.
+
+    Args:
+        sequences (list of str): List of DNA sequences.
+        k (int, optional): Length of k-mers to extract. Defaults to 5.
+
+    Returns:
+        numpy.ndarray: A 2D array of shape (num_sequences, sequence_length - k + 1) containing the k-mer indices.
+    """
+
     nucleotide_map = {'A': 0, 'C': 1, 'G': 2, 'T': 3}
     seq_matrix = np.array([[nucleotide_map[nuc] for nuc in seq] for seq in sequences])
 
@@ -242,6 +338,19 @@ def sequence_to_kmer_indices_vectorized(sequences, k=5):
     return kmer_indices
 
 def compute_kmer_embeddings(sequences, k=5):
+    """Compute k-mer embeddings for a list of DNA sequences.
+
+    This function generates a k-mer count embedding for each sequence by first converting sequences to k-mer indices and then counting
+    the frequency of each possible k-mer. The resulting counts are normalized by the total number of k-mers in each sequence.
+
+    Args:
+        sequences (list of str): List of DNA sequences.
+        k (int, optional): Length of the k-mers to use. Defaults to 5.
+
+    Returns:
+        numpy.ndarray: An array of shape (num_sequences, 4**k) containing normalized k-mer count embeddings.
+    """
+
     kmer_indices = sequence_to_kmer_indices_vectorized(sequences, k=k)
     num_kmers = 4 ** k
     num_sequences = len(sequences)
@@ -307,6 +416,23 @@ def distance_from_closest_in_second_set(distances):
 
 
 def calculate_similarity_metric(local_train_sequences, local_generated_sequences, seq_length, device, batch_size=500000):
+    """Calculate a similarity metric between training and generated DNA sequences.
+
+    This function one-hot encodes the input sequences and computes a similarity matrix using a tensor dot product.
+    For each generated sequence, it finds the maximum similarity with any training sequence, and the final metric is the mean
+    of these maximum similarity scores.
+
+    Args:
+        local_train_sequences (list of str): List of training DNA sequences.
+        local_generated_sequences (list of str): List of generated DNA sequences.
+        seq_length (int): Length to which sequences should be one-hot encoded.
+        device (str): Device to use for tensor computations (e.g., 'cuda' or 'cpu').
+        batch_size (int, optional): Batch size for processing sequences. Defaults to 500000.
+
+    Returns:
+        float: The mean maximum similarity score between generated and training sequences.
+    """
+
     # One-hot encode the sequences
     train_encoded = torch.tensor(np.array([one_hot_encode_dna_sequence(x, seq_length) for x in local_train_sequences]), dtype=torch.float16)
     generated_encoded = torch.tensor(np.array([one_hot_encode_dna_sequence(x, seq_length) for x in local_generated_sequences]), dtype=torch.float16)
@@ -332,7 +458,22 @@ def calculate_similarity_metric(local_train_sequences, local_generated_sequences
     return local_max_similarity
 
 def extract_motifs(sequence_list: list, run_name='', save_bed_file=False, get_table=False):
-    """Extract motifs from a list of sequences"""
+    """Extract motif information from a list of sequences.
+
+    This function writes the provided list of sequences to a FASTA file, runs an external motif scanning tool on the file,
+    and processes the output to aggregate motif counts. Optionally, the results can be saved to a BED file or returned
+    as a detailed table.
+
+    Args:
+        sequence_list (list): List of DNA sequences.
+        run_name (str, optional): Identifier to prefix output file names. Defaults to ''.
+        save_bed_file (bool, optional): If True, saves the motif scanning results to a BED file. Defaults to False.
+        get_table (bool, optional): If True, returns the full table of motif scanning results. Defaults to False.
+
+    Returns:
+        pandas.DataFrame: A DataFrame containing aggregated motif counts by motif name. If get_table is True, returns the raw motif table.
+    """
+
     fasta_name = f"{training_data_path}/{run_name}synthetic_motifs.fasta"
     motifs = open(fasta_name, "w")
     motifs.write("\n".join(sequence_list))
@@ -369,6 +510,21 @@ def extract_motifs(sequence_list: list, run_name='', save_bed_file=False, get_ta
 
 
 def compare_motif_list(df_motifs_a: pd.DataFrame, df_motifs_b: pd.DataFrame):
+    """Compare two motif count distributions using Jensen-Shannon divergence.
+
+    This function takes two DataFrames of motif counts, reindexes them to share the same set of motifs (filling missing values with 1),
+    and computes the probability distributions. It then calculates and returns the Jensen-Shannon divergence between these distributions.
+    If one or both DataFrames are empty, a divergence of 1.0 is returned.
+
+    Args:
+        df_motifs_a (pandas.DataFrame): DataFrame of motif counts for the first dataset, indexed by motif names.
+        df_motifs_b (pandas.DataFrame): DataFrame of motif counts for the second dataset, indexed by motif names.
+
+    Returns:
+        float: The Jensen-Shannon divergence between the two motif distributions.
+    """
+
+    
     if df_motifs_a.empty or df_motifs_b.empty:
         print("One or both DataFrames are empty. Returning JS divergence of 1.")
         return 1.0
@@ -406,6 +562,22 @@ def js_heatmap(
     cell_dict2:dict,
     label_list,   
     ):
+    """Compute a matrix of Jensen-Shannon divergences for heatmap visualization.
+
+    This function iterates over a list of cell labels and compares motif distributions between two cell dictionaries.
+    For each pair of labels, it computes the Jensen-Shannon divergence using the motif comparison function.
+    If motif data is missing for a given cell label, a divergence value of -1 is used.
+
+    Args:
+        cell_dict1 (dict): Dictionary mapping cell labels to motif count DataFrames (first dataset).
+        cell_dict2 (dict): Dictionary mapping cell labels to motif count DataFrames (second dataset).
+        label_list (list): List of cell labels to compare.
+
+    Returns:
+        list: A 2D list (matrix) containing Jensen-Shannon divergence values for each pair of cell labels.
+    """
+
+    
     final_comp_js = []
     for cell_num1 in label_list:
         comparison_array = []
@@ -422,6 +594,22 @@ def js_heatmap(
 
 
 def generate_heatmap(df_heat: pd.DataFrame, x_label: str, y_label: str, label_list: list, save_dir: str = training_data_path):
+    """Generate and save a heatmap of Jensen-Shannon divergence values.
+
+    This function creates a heatmap from a DataFrame of divergence values. It labels the axes using the provided label list,
+    applies visual customizations such as annotation size and color scaling, and saves the resulting heatmap image to the specified directory.
+
+    Args:
+        df_heat (pandas.DataFrame): DataFrame containing divergence values.
+        x_label (str): Label for the x-axis (e.g., name of the first dataset).
+        y_label (str): Label for the y-axis (e.g., name of the second dataset).
+        label_list (list): List of tuples or identifiers used to label the heatmap axes.
+        save_dir (str, optional): Directory where the heatmap image will be saved. Defaults to the training data path.
+
+    Returns:
+        None
+    """
+
     df_plot = pd.DataFrame(df_heat)
     df_plot.columns = [f"{x[0]} : {x[1]}" for x in label_list]
     df_plot.index = df_plot.columns
@@ -451,6 +639,18 @@ def generate_heatmap(df_heat: pd.DataFrame, x_label: str, y_label: str, label_li
 
 
 def plot_training_loss(values, save_dir):
+    """Plot and save the training loss curve.
+
+    This function generates a line plot of the training loss values over epochs and saves the plot image to the specified directory.
+
+    Args:
+        values (list or array-like): Sequence of loss values recorded during training.
+        save_dir (str): Directory where the loss plot image will be saved.
+
+    Returns:
+        None
+    """
+
     plt.figure()
     plt.plot(values)
     plt.title(f"Training process \n Loss")
@@ -460,6 +660,21 @@ def plot_training_loss(values, save_dir):
 
 
 def plot_training_validation(values_list, y_labels, per_epoch, save_dir):
+    """Plot and save validation metrics recorded during training.
+
+    This function creates a plot for one or more validation metrics, where each metric is plotted against epochs.
+    The x-axis is scaled based on the frequency (per_epoch) at which metrics were recorded, and the plot is saved to the specified directory.
+
+    Args:
+        values_list (list of list or array-like): A list containing sequences of validation metric values.
+        y_labels (list of str): Labels corresponding to each validation metric.
+        per_epoch (int): Frequency (in epochs) at which validation metrics were recorded.
+        save_dir (str): Directory where the validation metrics plot will be saved.
+
+    Returns:
+        None
+    """
+
     plt.figure()
     for idx, values in enumerate(values_list):
         X = list(range(0,len(values)*per_epoch,per_epoch))

@@ -87,11 +87,16 @@ def log1pMSELoss_batch(log_predicted_counts, true_counts):
     
     return per_example_loss  # shape (batch_size,)
 
+# Copied and edited Universal Guidance code
+
+# main function in inference guidance you want to look at is ddim_sample_operation
+
 def create_model_and_diffusion(config):
         # logger.log("creating model and diffusion...")
         image_size=config.image_size
         attention_resolutions = config.attention_resolutions
         channel_mult = (1, 2, 3)
+        # resolutions are calculated based on init
         if attention_resolutions == "":
             if image_size == 200:
                 attention_resolutions="100,50"
@@ -104,7 +109,7 @@ def create_model_and_diffusion(config):
         attention_ds = []
         for res in attention_resolutions.split(","):
             attention_ds.append(config.image_size // int(res))
-        NUM_CLASSES = 10
+            
         model = UNetModel(
             image_size=config.image_size,
             in_channels=1,
@@ -115,7 +120,7 @@ def create_model_and_diffusion(config):
             dropout=config.dropout,
             channel_mult=channel_mult,
             dims=2,
-            num_classes=(NUM_CLASSES if config.class_cond else None),
+            num_classes=(config.n_classes if config.class_cond else None),
             use_checkpoint=config.use_checkpoint,
             use_fp16=False,
             num_heads=config.num_heads,

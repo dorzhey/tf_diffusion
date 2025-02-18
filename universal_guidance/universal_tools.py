@@ -60,6 +60,13 @@ from utils_data import SequenceDataset
 from universal_models import EMA
 
 class TrainLoop:
+    """Class for managing the training loop for a diffusion model with universal guidance.
+
+    This class encapsulates the entire training procedure including data loading, model optimization, sampling,
+    and periodic evaluation. It supports distributed training using the Accelerator framework and integrates
+    guidance mechanisms via an external guidance model.
+    """
+
     def __init__(
         self,
         *,
@@ -80,13 +87,40 @@ class TrainLoop:
         lr_anneal_steps=0,
         run_name='',
     ):
+        """Initialize the TrainLoop.
+
+        Initializes the training loop for the diffusion model with universal guidance. This includes setting up the
+        data loader, optimizer, learning rate scheduler, EMA model, and various sampling and logging configurations.
+
+        Args:
+            config (dict[str, Any]): Configuration dictionary containing training hyperparameters and settings.
+            operation_config (dict[str, Any]): Configuration dictionary for operational settings and guidance model parameters.
+            model (torch.nn.Module): The diffusion model to be trained.
+            diffusion (torch.nn.Module): Diffusion process module that defines the forward/backward diffusion steps.
+            accelerator (Accelerator): Accelerator instance to facilitate distributed training.
+            guide_model: The guidance model used to modify the loss function or steer the generation process.
+            data: Preprocessed training data including encoded sequences and related metadata.
+            batch_size (int): Batch size per process.
+            lr (float): Initial learning rate.
+            log_interval (int): Interval (in training steps) at which logging is performed.
+            sample_interval (int): Interval (in training steps) at which samples are generated.
+            save_interval (int): Interval (in training steps) at which the model is checkpointed.
+            resume_checkpoint: Path to a checkpoint file for resuming training, if applicable.
+            schedule_sampler (optional): Sampler for selecting diffusion timesteps; defaults to UniformSampler if not provided.
+            lr_anneal_steps (int, optional): Total number of steps over which to anneal the learning rate.
+            run_name (str, optional): Identifier for the current run used for logging and file naming.
+
+        Returns:
+            None
+        """
+
         self.accelerator = accelerator
         self.config = config
         self.train_cond = config.train_cond
         self.encode_data = data
-        labels = torch.from_numpy(self.encode_data["x_train_cell_type"]).float() if self.train_cond else None
+        labels = torch.from_numpy(self.encode_data["x_train_cell_type"]).int() if self.train_cond else None
         seq_dataset = SequenceDataset(seqs=torch.from_numpy(self.encode_data["X_train"]).float(), 
-                                      c=labels, transform_ddsm = False, include_labels = False)
+                                      c=labels, include_labels = self.train_cond, transform_ddsm = False)
         data_loader = DataLoader(seq_dataset, batch_size=config.batch_size, shuffle=True, num_workers=config.num_workers, pin_memory=True, drop_last=True)
     
         self.lr = lr
@@ -120,7 +154,7 @@ class TrainLoop:
         #     self._load_optimizer_state()
         # self.ema_rate = config.ema_rate
         
-        self.ema = EMA(config.ema_rate)
+        # self.ema = EMA(config.ema_rate)
         self.ema_model = copy.deepcopy(model).eval().requires_grad_(False)
             
         # sampling
@@ -156,7 +190,15 @@ class TrainLoop:
         self.log_dict = {}
 
     def run_loop(self):
-        
+        """Run the main training loop.
+
+        Iterates through the training steps, performing forward and backward passes, sampling, logging, and checkpointing.
+        If the current process is the main process, it initializes tracking (e.g., via wandb) and logs metrics.
+
+        Returns:
+            None
+        """
+
         if self.accelerator.is_main_process:
             # Initialize wandb
             wandb_config = self.config.to_dict()#{"learning_rate": config.lr, "seq_length": config.seq_length, "batch_size": config.batch_size}
@@ -193,6 +235,19 @@ class TrainLoop:
             self.save_model()
 
     def run_step(self, batch):
+        """Perform a single training step.
+
+        Processes a single batch from the dataloader, computes the diffusion loss using the current model and timestep,
+        and updates the model parameters via backpropagation and an optimizer step. Optionally, updates the learning rate
+        by annealing.
+
+        Args:
+            batch: A batch of training data. If training is conditional, this is expected to be a tuple of (data, condition).
+
+        Returns:
+            None
+        """
+
         self.optimizer.zero_grad()
         if self.train_cond:
             batch, cond = batch
@@ -220,20 +275,30 @@ class TrainLoop:
         self.optimizer.step()
         
 
-        self.ema.step_ema(self.ema_model, self.accelerator.unwrap_model(self.model))
+        # self.ema.step_ema(self.ema_model, self.accelerator.unwrap_model(self.model))
         self.current_lr = self._anneal_lr()
         
         self.avg_loss.append(self.accelerator.gather(loss).mean().item())
 
     
     def initialize_sampling(self):
+        """Initialize sampling parameters for generation.
+
+        Randomly subsamples transcription factor clusters from the training data and assigns a subset to the current process.
+        Prepares the label array for use during the sampling/generation phase.
+
+        Returns:
+            None
+        """
+
 
         all_tf_clusters = list(self.encode_data['bidir_cre_dict'].keys())
 
         # randomly subsample from all tf_cluster
         subsampled_tf_clusters_ = []
         if self.accelerator.is_main_process:
-            subsampled_tf_clusters_ = random.sample(all_tf_clusters, self.sampling_subset_random)
+            min_len = min(self.sampling_subset_random, len(all_tf_clusters))
+            subsampled_tf_clusters_ = random.sample(all_tf_clusters, min_len)
         self.subsampled_tf_clusters = self.accelerator.gather_for_metrics(subsampled_tf_clusters_, use_gather_object=True)
 
         start_index, end_index = calculate_start_end_indices(len(self.subsampled_tf_clusters), self.accelerator.num_processes, self.accelerator.process_index)
@@ -255,8 +320,22 @@ class TrainLoop:
         print(f"Process {self.accelerator.process_index} handles {len(extended_label_array)} samples.")
 
     def create_sample_labelwise_parallel_dynamic(self):
+        """Generate synthetic samples and extract motifs in parallel.
+
+        Generates synthetic DNA sequences using the diffusion model with universal guidance by sampling in batches.
+        Converts the generated images to nucleotide sequences, aggregates them in FASTA format, and extracts motif counts.
+        Gathers and reconstructs cell-type specific motif counts and generated sequences across distributed processes.
+
+        Returns:
+            tuple: A tuple containing:
+                - generated_bulk_motif (pandas.DataFrame): Aggregated motif counts for all generated sequences.
+                - reconstructed_celltype_motif (dict): Dictionary mapping each cell type to its motif counts DataFrame.
+                - reconstructed_celltype_sequences (dict): Dictionary mapping each cell type to a list of generated DNA sequences.
+        """
+
         self.accelerator.print(f"Sampling at step {self.step}")
-        self.operation_config.loss_func.predictor_model.to(self.device)
+        if self.operation_config.guidance_3:
+            self.operation_config.loss_func.predictor_model.to(self.device)
         # model = self.accelerator.unwrap_model(self.model)
         self.model.eval()
         # model.requires_grad_(False)
@@ -277,14 +356,18 @@ class TrainLoop:
                 np.append(self.encode_data['tf_cluster_state_dict'][tf_cluster], [pos_cre_counts, neg_cre_counts]) 
                 for tf_cluster, pos_cre_counts, neg_cre_counts in batch_labels
             ])
-            conditions_tensor = torch.tensor(conditions).float().to(self.device)
+            conditions_tensor = torch.as_tensor(conditions, dtype=torch.float32, device=self.device)
+            label_tensor = {}
+            if config.train_cond:
+                label_tensor['y'] = torch.tensor(np.array([tf_cluster for tf_cluster, _,__ in batch_labels]), dtype=torch.int, device=self.device)
+            
             sampled_images, guide_loss = self.diffusion.ddim_sample_loop_operation(
                 self.model,
                 (len(conditions), 1, 4, config.image_size),
                 operated_image=conditions_tensor,
                 operation=self.operation_config,
                 clip_denoised=config.clip_denoised,
-                model_kwargs={},
+                model_kwargs= label_tensor,
                 cond_fn=None,
                 device=self.device,
                 progress=False,
@@ -331,7 +414,8 @@ class TrainLoop:
             reconstructed_celltype_motif.update(item)
         
         self.model.train()
-        self.operation_config.loss_func.predictor_model.to("cpu")
+        if self.operation_config.guidance_3:
+            self.operation_config.loss_func.predictor_model.to("cpu")
         # self.model.requires_grad_(True)
         # for param in self.model.parameters():
         #     param.requires_grad = True
@@ -339,6 +423,21 @@ class TrainLoop:
         return generated_bulk_motif, reconstructed_celltype_motif, reconstructed_celltype_sequences
     
     def calculate_metrics_labelwise_parallel(self, generated_motif, generated_celltype_motif, generated_celltype_sequences):
+        """Calculate and log label-wise validation metrics in parallel.
+
+        Computes various similarity and motif validation metrics (e.g., Jensen–Shannon divergence, GC content ratio,
+        edit distance, k-nearest neighbor distances) between generated and training sequences. Aggregates metrics
+        across distributed processes, logs the results, and updates the model checkpoint if an improvement is observed.
+
+        Args:
+            generated_motif (pandas.DataFrame): Bulk motif counts from generated sequences.
+            generated_celltype_motif (dict): Dictionary of cell-type specific generated motif counts.
+            generated_celltype_sequences (dict): Dictionary of cell-type specific generated DNA sequences.
+
+        Returns:
+            None
+        """
+
         self.accelerator.print("calculating metrics at step", self.step)
         device = self.device
         start_time = time.time()
@@ -474,6 +573,20 @@ class TrainLoop:
     #     return self.model(x, t, y if self.config.class_cond else None)
 
     def bulk_motif_to_celltype(self, df_motifs):
+        """Convert a bulk motif table into cell-type specific motif counts.
+
+        Extracts the transcription factor cluster identifier from sequence IDs in the motif table and aggregates motif counts
+        for each cell type. Also computes the overall bulk motif counts across all sequences.
+
+        Args:
+            df_motifs (pandas.DataFrame): DataFrame containing motif counts with sequence IDs as its index.
+
+        Returns:
+            tuple: A tuple containing:
+                - bulk_motifs (pandas.DataFrame): Aggregated motif counts for all sequences.
+                - generated_celltype_motif (dict): Dictionary mapping each cell type to its corresponding motif counts DataFrame.
+        """
+
         # we take table sequence_id as 0 column x motif name as first row
         generated_celltype_motif = {}
         # cut the sequence id to get tf_cluster
@@ -564,29 +677,52 @@ def rename_file_to_best(file_path, step):
     return os.path.join(dir_name, new_file_name)
 
 class OperationArgs:
-    def __init__(self):
-        self.guidance_3 = False # universal guidance or not
-        # self.original_guidance = False # whether to use original classifier guidance with cond_fn
+    """Container for operation-specific arguments and settings for universal guidance.
 
-        self.operation_func = None # guidance model
-        self.loss_func = None # guidance loss func, specified later
+    This class holds configuration parameters used in the guidance operation, including flags for enabling universal
+    guidance, guidance loss functions, optimizer parameters, learning rate, and other hyperparameters.
 
-        self.optim_guidance_3_wt = 10000
-        self.num_steps = [3]
-        
-        self.max_iters = 0
-        self.loss_cutoff = 1.0
-        self.optimizer = None # 'Adam'
-        self.lr_scheduler = None #'CosineAnnealingLR'
-        self.lr = 1e-2
-        self.tv_loss = 10
-        
-        self.warm_start = False
-        self.old_img = None
-        self.fact = 0.5
-        self.sampling_type = None # ddpm, fully_random or None
-        
-        
+    Class Attributes:
+        guidance_3 (bool): Flag indicating whether to use universal guidance.
+        operation_func: Function representing the guidance model.
+        loss_func: Loss function for the guidance operation (to be specified later).
+        optim_guidance_3_wt (float): Weight for the guidance optimizer.
+        num_steps (list): List specifying the number of steps for the guidance operation.
+        max_iters (int): Maximum number of iterations.
+        loss_cutoff (float): Threshold for loss cutoff.
+        optimizer: Optimizer to be used (e.g., 'Adam').
+        lr_scheduler: Learning rate scheduler (e.g., 'CosineAnnealingLR').
+        lr (float): Learning rate.
+        tv_loss (int): Total variation loss parameter.
+        warm_start (bool): Flag indicating whether to perform a warm start.
+        old_img: Placeholder for a previous image, if applicable.
+        fact (float): Scaling factor used in the operation.
+        sampling_type: Specifies the type of sampling (e.g., ddpm, fully_random, or None).
+
+    Methods:
+        to_dict: Returns a dictionary representation of the operation arguments.
+    """
+
+    guidance_3 = False # universal guidance or not
+    # original_guidance = False # whether to use original classifier guidance with cond_fn
+
+    operation_func = None # guidance model
+    loss_func = None # guidance loss func, specified later
+
+    optim_guidance_3_wt = 0.0001
+    num_steps = [1]
+    
+    max_iters = 0
+    loss_cutoff = 1.0
+    optimizer = None # 'Adam'
+    lr_scheduler = None #'CosineAnnealingLR'
+    lr = 1e-2
+    tv_loss = 10
+    
+    warm_start = False
+    old_img = None
+    fact = 0.5
+    sampling_type = None # ddpm, fully_random or None
 
     @classmethod
     def to_dict(cls):

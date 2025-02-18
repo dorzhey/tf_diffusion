@@ -42,8 +42,8 @@ from universal_tools import (
 class DiffusionTrainingConfig:
     datafile=f'{data_dir}/sampled_df_columns_renamed_bidir.csv'
     device = 'cuda'
-    pikle_filename = "cre_expression_bidir_tf_state_512seqlength_activecre"
-    run_name = "512seqlength_bidir_activecre" # for gimme scan erros when doing several runs simultaneously 
+    pikle_filename = "cre_expr_bidir_512seqlength_classcond_12clusters"
+    run_name = "512seqlength_bidir_classcond_12clusters" # for gimme scan erros when doing several runs simultaneously 
     guide_checkpoint = "guide_checkpoints/model_e9_b9901.pth"
     load_data = True
     subset = None
@@ -51,10 +51,11 @@ class DiffusionTrainingConfig:
     seq_length=512
     
     batch_size=256
-    train_cond = False # whether to train conditionally
+    train_cond = True # whether to train conditionally
+    n_classes=469
     lr=1e-4
-    weight_decay=0.1
-    lr_anneal_steps=2000
+    weight_decay=0.15
+    lr_anneal_steps=10000
     
     log_interval=20
     sample_interval=20
@@ -68,7 +69,7 @@ class DiffusionTrainingConfig:
     clip_denoised=True
     
     sampling_subset_random = 50 # number of cell types to subset for faster sampling
-    num_cre_counts_per_cell_type = 200
+    num_cre_counts_per_cell_type = 500
     parallel_generating_bs = 256 # used for parallel sampling, adjust based on GPU memory capabilities
     get_seq_metrics = False
     get_kmer_metrics_bulk = False
@@ -76,18 +77,18 @@ class DiffusionTrainingConfig:
     kmer_length = 5   
 
     # model
-    class_cond=False
+    class_cond=train_cond
     use_checkpoint=False # not implemented
     image_size=seq_length
     ema_rate=0.99
-    num_channels=64
+    num_channels=128
     num_res_blocks=2
     num_heads=2
     num_heads_upsample=-1
     num_head_channels=-1
     attention_resolutions=""
     # channel_mult=""
-    dropout=0.3
+    dropout=0.15
     
     use_scale_shift_norm=True
     resblock_updown=True
@@ -127,10 +128,8 @@ data = load_TF_data_bidir(
 )
 print("loaded data")
 
-# ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
 dataloader_config = DataLoaderConfiguration(split_batches=False)
 accelerator = Accelerator(
-            # kwargs_handlers=[ddp_kwargs],
             dataloader_config = dataloader_config, 
             cpu= (config.device == "cpu"), 
             mixed_precision= None, 

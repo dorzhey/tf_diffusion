@@ -35,6 +35,37 @@ def load_TF_data_bidir(
     train_cond: bool = True,
     run_name: str = '',
 ):
+    """Load and preprocess transcription factor (TF) data for bidirectional analysis.
+
+    This function loads TF data either from a saved pickle file or by processing a raw data file using
+    `preprocess_TF_data_bidir`. It then constructs one-hot encoded DNA sequences and extracts motif information,
+    organizing the data into training, testing, and shuffled sets along with associated cell type labels.
+
+    Args:
+        data_path (str): Path to the raw data CSV file.
+        seqlen (int, optional): Desired sequence length. Defaults to 200.
+        saved_file_name (str, optional): Name of the pickle file to load preprocessed data from. Defaults to "encode_data.pkl".
+        limit_total_sequences (int, optional): Limit on the total number of sequences to process. If 0, all sequences are used.
+        to_save_file_name (str, optional): Base name used when saving preprocessed data. Defaults to "encode_data".
+        load_saved_data (bool, optional): If True, load preprocessed data from the pickle file; otherwise, preprocess the raw data. Defaults to False.
+        train_cond (bool, optional): If True, filter training data to include only sequences with non-zero `cre_pos` or `cre_neg` values. Defaults to True.
+        run_name (str, optional): String identifier for the current run, used to tag output files. Defaults to ''.
+
+    Returns:
+        dict: A dictionary containing:
+            - "train_motifs": Motif information for training data.
+            - "train_motifs_cell_specific": Cell-type-specific motif information for training data.
+            - "test_motifs": Motif information for test data.
+            - "test_motifs_cell_specific": Cell-type-specific motif information for test data.
+            - "shuffle_motifs": Motif information for shuffled data.
+            - "shuffle_motifs_cell_specific": Cell-type-specific motif information for shuffled data.
+            - "train_sequences_cell_specific": A dictionary mapping TF clusters to lists of DNA sequences.
+            - "bidir_cre_dict": Dictionary mapping TF clusters to combined `cre_pos` and `cre_neg` values.
+            - "tf_cluster_state_dict": Dictionary mapping TF clusters to their state arrays.
+            - "X_train": One-hot encoded training sequences.
+            - "x_train_cell_type": Array of TF cluster labels for training data if `train_cond` is True; otherwise, None.
+    """
+
     if load_saved_data:
         path = f"{training_data_path}/{saved_file_name}"
         with open(path, "rb") as file:
@@ -52,7 +83,9 @@ def load_TF_data_bidir(
     
     # Creating sequence dataset
     train_df = encode_data['train_df']
+    
     if train_cond:
+        train_df = train_df[(train_df['cre_pos']>0) | (train_df['cre_neg'] >0)]
         X_train = np.stack(train_df['cre_sequence'].apply(one_hot_encode_dna_sequence, length=seqlen).values)
     else:
         X_train = np.stack([one_hot_encode_dna_sequence(seq, length=seqlen) for seq in train_df['cre_sequence'].unique()])
@@ -61,10 +94,11 @@ def load_TF_data_bidir(
     # Creating labels
     x_train_cell_type = None
     if train_cond:
-        tf_states = np.stack(train_df['tf_state'].to_numpy())
-        expr_pos = train_df['cre_pos'].to_numpy().astype(np.int8).reshape(-1, 1)
-        expr_neg = train_df['cre_neg'].to_numpy().astype(np.int8).reshape(-1, 1)
-        x_train_cell_type = np.hstack((tf_states, expr_pos, expr_neg))
+        # tf_states = np.stack(train_df['tf_state'].to_numpy())
+        # expr_pos = train_df['cre_pos'].to_numpy().astype(np.int8).reshape(-1, 1)
+        # expr_neg = train_df['cre_neg'].to_numpy().astype(np.int8).reshape(-1, 1)
+        # x_train_cell_type = np.hstack((tf_states, expr_pos, expr_neg))
+        x_train_cell_type = train_df['tf_cluster'].to_numpy(dtype=np.int16)
     
     # Collecting variables into a dict
     return {
@@ -91,6 +125,31 @@ def preprocess_TF_data_bidir(
         save_output = True,
         run_name = '',
     ):
+    """Preprocess transcription factor (TF) data for bidirectional analysis.
+
+    This function reads raw TF data from a CSV file, cleans and filters the data (e.g., removing sequences containing 'N'),
+    applies padding and cutting of DNA sequences based on a specified sequence length, and constructs motif information for
+    training, testing, and shuffled datasets. It also prepares auxiliary dictionaries for bidirectional CRE information and
+    TF cluster states.
+
+    Args:
+        data_file (str): Path to the raw data CSV file.
+        seqlen (int, optional): Desired sequence length for DNA sequences. Defaults to 200.
+        subset (int, optional): If provided, a subset of the data is sampled with this many rows. Defaults to None.
+        save_name (str, optional): Base name for saving the preprocessed data to a pickle file. Defaults to "encode_data".
+        save_output (bool, optional): If True, saves the preprocessed data as a pickle file. Defaults to True.
+        run_name (str, optional): Identifier string for the current run, appended to output file names. Defaults to ''.
+
+    Returns:
+        dict: A dictionary containing:
+            - "train": Motif information for training data.
+            - "test": Motif information for test data.
+            - "shuffled": Motif information for shuffled data.
+            - "train_df": DataFrame with selected columns from the training data.
+            - "tf_cluster_state_dict": Dictionary mapping TF clusters to their state arrays.
+            - "bidir_cre_dict": Dictionary mapping TF clusters to a 2-column array of `cre_pos` and `cre_neg` values.
+    """
+
     data = pd.read_csv(data_file, index_col=0)
 
     # drop sequences with N
@@ -100,7 +159,7 @@ def preprocess_TF_data_bidir(
         # take subset rows of each cell type 
         data = data.sample(subset).reset_index(drop=True)
 
-
+    data = data[data['tf_cluster'].isin([180, 348, 117, 208, 249, 121, 44, 424, 61, 245, 13, 106])]
     tf_cluster_state_dict = {x:string_to_array(y) for x,y in data[['tf_cluster','tf_state']].value_counts().index.to_list()}
     # yes in this order, coz otherwise raises TypeError: unhashable type: 'numpy.ndarray'
     data['tf_state'] = data['tf_state'].apply(string_to_array)
@@ -154,6 +213,37 @@ def load_TF_data(
     load_saved_data: bool = False,
     run_name: str = '',
 ):
+    """Load and preprocess transcription factor (TF) data.
+
+    This function loads TF data either from a preprocessed pickle file or by processing a raw CSV file using
+    `preprocess_TF_data`. It generates one-hot encoded DNA sequences and constructs motif information for training,
+    testing, and shuffled datasets. Additionally, it prepares labels by combining TF state information with discretized
+    CRE expression values.
+
+    Args:
+        data_path (str): Path to the raw data CSV file.
+        seqlen (int, optional): Desired sequence length for DNA sequences. Defaults to 200.
+        saved_file_name (str, optional): Name of the pickle file to load preprocessed data from. Defaults to "encode_data.pkl".
+        limit_total_sequences (int, optional): Limit on the total number of sequences to process. If 0, all sequences are used.
+        to_save_file_name (str, optional): Base name used when saving preprocessed data. Defaults to "encode_data".
+        load_saved_data (bool, optional): If True, loads preprocessed data from the pickle file; otherwise, processes the raw data. Defaults to False.
+        run_name (str, optional): Identifier string for the current run, used to tag output files. Defaults to ''.
+
+    Returns:
+        dict: A dictionary containing:
+            - "train_motifs": Motif information for training data.
+            - "train_motifs_cell_specific": Cell-type-specific motif information for training data.
+            - "test_motifs": Motif information for test data.
+            - "test_motifs_cell_specific": Cell-type-specific motif information for test data.
+            - "shuffle_motifs": Motif information for shuffled data.
+            - "shuffle_motifs_cell_specific": Cell-type-specific motif information for shuffled data.
+            - "train_sequences": List of training DNA sequences.
+            - "label_ratio": Dictionary with the ratio of labels.
+            - "tf_cluster_state_dict": Dictionary mapping TF clusters to their state arrays.
+            - "X_train": One-hot encoded training sequences.
+            - "x_train_cell_type": Array combining TF state and discretized CRE expression values for training data.
+    """
+
     if load_saved_data:
         path = f"{training_data_path}/{saved_file_name}"
         with open(path, "rb") as file:
@@ -217,6 +307,31 @@ def preprocess_TF_data(
         save_output = True,
         run_name = '',
     ):
+    """Preprocess transcription factor (TF) data.
+
+    This function reads raw TF data from a CSV file, cleans and filters the data by removing sequences containing 'N',
+    applies padding and midpoint cutting based on a specified sequence length, and creates discretized CRE expression labels.
+    It partitions the data into training, test, and shuffled datasets based on chromosome information, and extracts motif
+    information from the sequences.
+
+    Args:
+        data_file (str): Path to the raw data CSV file.
+        seqlen (int, optional): Desired sequence length for DNA sequences. Defaults to 200.
+        subset (int, optional): If provided, a subset of the data is sampled with this many rows. Defaults to None.
+        save_name (str, optional): Base name for saving the preprocessed data to a pickle file. Defaults to "encode_data".
+        save_output (bool, optional): If True, saves the preprocessed data as a pickle file. Defaults to True.
+        run_name (str, optional): Identifier string for the current run, appended to output file names. Defaults to ''.
+
+    Returns:
+        dict: A dictionary containing:
+            - "train": Motif information for training data.
+            - "test": Motif information for test data.
+            - "shuffled": Motif information for shuffled data.
+            - "train_df": DataFrame with selected columns from the training data.
+            - "label_ratio": Dictionary representing the ratio of label occurrences.
+            - "tf_cluster_state_dict": Dictionary mapping TF clusters to their state arrays.
+    """
+
     data = pd.read_csv(data_file, index_col=0)
 
     # drop sequences with N
@@ -279,6 +394,29 @@ def preprocess_TF_data(
 
 
 def construct_motifs(df, name, bidir=False):
+    """Construct motif information from a given DataFrame of genomic sequences.
+
+    This function generates a FASTA file from the provided DataFrame, runs a motif scanning tool on the FASTA file, and
+    processes the resulting motif data. The motifs are aggregated both globally and by cell type or expression status,
+    depending on the `bidir` flag.
+
+    Args:
+        df (pandas.DataFrame): DataFrame containing genomic sequences and associated metadata. Must include 'locus_id',
+            'tf_cluster', and relevant expression columns (either 'cre_expression' or both 'cre_pos' and 'cre_neg').
+        name (str): Base name used for the FASTA file and motif scan identifiers.
+        bidir (bool, optional): If True, groups motifs by TF cluster using bidirectional CRE information; otherwise, groups
+            by TF cluster and discretized CRE expression. Defaults to False.
+
+    Returns:
+        dict: A dictionary containing:
+            - "motifs": A DataFrame of aggregated motif counts across all sequences.
+            - "motifs_by_cell_type": A dictionary where keys are group identifiers (e.g., TF clusters or TF cluster with
+            expression status) and values are DataFrames of aggregated motif counts for that group.
+
+    Raises:
+        Exception: If the input DataFrame does not contain expected expression columns.
+    """
+
     # Step 1: Prepare Data for FASTA and Motifs Extraction
     data = df.drop_duplicates('locus_id')
     fasta_path = f"{training_data_path}/{name}.fasta"
@@ -324,6 +462,23 @@ def construct_motifs(df, name, bidir=False):
 
 
 def call_motif_scan(fasta, get_table=False, progress_bar=False, is_endogen = False):
+    """Run a motif scanning tool on a given FASTA file and return the results.
+
+    This function calls an external motif scanning command (via `command_scan`) on the provided FASTA file using specified
+    parameters. It processes the raw output into a pandas DataFrame. Optionally, if `get_table` is True, it formats the DataFrame
+    with appropriate headers and indices. If `is_endogen` is True, it truncates the locus identifier for endogenously processed sequences.
+
+    Args:
+        fasta (str): Path to the FASTA file containing genomic sequences.
+        get_table (bool, optional): If True, formats the output as a table with headers. Defaults to False.
+        progress_bar (bool, optional): If True, displays a progress bar during motif scanning. Defaults to False.
+        is_endogen (bool, optional): If True, processes locus identifiers to include only the first four underscore-separated components.
+            Defaults to False.
+
+    Returns:
+        pandas.DataFrame: A DataFrame containing motif scanning results, either as raw output or formatted as a table.
+    """
+
     df_results = pd.DataFrame(line.split('\t') for line in command_scan(
         fasta,
         "JASPAR2020_vertebrates",
@@ -358,6 +513,18 @@ def call_motif_scan(fasta, get_table=False, progress_bar=False, is_endogen = Fal
     
 
 def string_to_array(s):
+    """Convert a string representation of a numerical array to a NumPy array.
+
+    This function cleans a string by removing extra whitespace and newline characters, then parses the string as a list
+    of floating-point numbers. The resulting array is returned as a NumPy array with dtype float16.
+
+    Args:
+        s (str): A string representing a numerical array, e.g., "[1.0 2.0 3.0]".
+
+    Returns:
+        numpy.ndarray: A NumPy array of floats (dtype=float16) parsed from the input string.
+    """
+
     # Remove newline characters and replace multiple spaces with a single space
     clean_str = re.sub(r'\s+', ' ', s.replace('\n', ' '))
     # Remove the brackets
@@ -368,6 +535,20 @@ def string_to_array(s):
     return np.array(array_list, dtype=np.float16)
 
 def cut_sequences_midpoint(data: pd.DataFrame, seqlen: int):
+    """Cut DNA sequences to a specified length centered around the midpoint.
+
+    This function adjusts each sequence in the input DataFrame to have a fixed length (`seqlen`) by centering the cut
+    around the midpoint defined by `summit_center`. Depending on the distances from the start and end of the CRE region,
+    the sequence is either taken from the beginning, the end, or centered around the summit.
+
+    Args:
+        data (pandas.DataFrame): DataFrame containing columns 'cre_sequence', 'summit_center', 'cre_start', and 'cre_end'.
+        seqlen (int): Desired sequence length after cutting.
+
+    Returns:
+        pandas.DataFrame: The updated DataFrame with the 'cre_sequence' column modified to the new length.
+    """
+
     half = round(seqlen / 2)
     
     # Calculate mid-start and end-mid upfront
@@ -402,6 +583,21 @@ def fetch_bases_from_genome(chromosome, start, end):
 
 
 def pad_sequences_midpoint(data: pd.DataFrame, seqlen: int):
+    """Pad DNA sequences to a specified length by fetching additional bases from the reference genome.
+
+    For each sequence in the DataFrame, this function calculates the required left and right padding lengths based on
+    the distance from the sequence's summit to its start and end positions. It then retrieves the missing bases from
+    the reference genome and prepends/appends them to the existing sequence.
+
+    Args:
+        data (pandas.DataFrame): DataFrame containing columns 'cre_sequence', 'summit_center', 'cre_start', 'cre_end',
+            and 'cre_chrom'.
+        seqlen (int): Desired total sequence length after padding.
+
+    Returns:
+        pandas.DataFrame: The updated DataFrame with the 'cre_sequence' column padded to the desired length.
+    """
+
     half = round(seqlen / 2)
 
     # Function to fetch and pad the sequence from the genome
@@ -433,14 +629,33 @@ def onehot_to_1channel_image(array):
     return np.expand_dims(array, axis=1)
 
 class SequenceDataset(Dataset):
+    """Custom PyTorch Dataset for DNA sequences and associated labels.
+
+    This dataset wraps one-hot encoded DNA sequences and their corresponding labels (if provided) for easy integration
+    with PyTorch data loaders. An optional transformation can be applied to the DNA sequences upon initialization.
+    """
+
     def __init__(
         self,
         seqs: np.ndarray,
         c: torch.Tensor = None,
         transform_dna=onehot_to_1channel_image,
         transform_ddsm=False,
-        include_labels=True  # Flag to control whether to include labels
+        include_labels=True  # flag to control whether to include labels
     ):
+        """Initialize the SequenceDataset.
+
+        Args:
+            seqs (numpy.ndarray): Array of DNA sequences (already one-hot encoded).
+            c (torch.Tensor, optional): Tensor of labels or additional context corresponding to each sequence.
+                Defaults to None.
+            transform_dna (callable, optional): Function to transform the DNA sequences. Defaults to `onehot_to_1channel_image`.
+            transform_ddsm (bool, optional): Placeholder for an additional transformation flag (not used in this implementation).
+                Defaults to False.
+            include_labels (bool, optional): Flag indicating whether to include labels in the dataset.
+                If False, only sequences will be returned. Defaults to True.
+        """
+
         if transform_dna:
             seqs = transform_dna(seqs)
         self.seqs = seqs

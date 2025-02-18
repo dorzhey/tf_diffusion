@@ -7,9 +7,9 @@ class ModelParameters:
     datafile = f'{data_dir}/sampled_df_columns_renamed_bidir.csv'
     seq_length = 512
     subset = None # rows
-    pikle_filename = "cre_expression_bidir_tf_state_512seqlength_activecre"
-    run_name = '512seqlength_bidir_activecre'
-    train_cond = False
+    pikle_filename = "cre_expr_bidir_512seqlength_classcond_3clusters"
+    run_name = '512seqlength_bidir_classcond_3clusters'
+    train_cond = True
 
 config = ModelParameters()
 data = load_TF_data_bidir(
